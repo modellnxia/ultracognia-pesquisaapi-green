@@ -1,0 +1,260 @@
+name: Monitor notebooklm-py Updates
+
+on:
+  schedule:
+    - cron: '0 9 * * MON'  # Toda segunda-feira às 9h UTC
+  workflow_dispatch:        # Permite execução manual
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-updates:
+    name: Check notebooklm-py Version
+    runs-on: ubuntu-latest
+    outputs:
+      current_version: ${{ steps.versions.outputs.current_version }}
+      latest_version: ${{ steps.versions.outputs.latest_version }}
+      update_type: ${{ steps.versions.outputs.update_type }}
+      has_update: ${{ steps.versions.outputs.has_update }}
+      release_notes: ${{ steps.versions.outputs.release_notes }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests packaging
+
+      - name: Check for updates
+        id: versions
+        run: python scripts/check_notebooklm_updates.py --github-output
+        env:
+          GITHUB_OUTPUT: ${{ env.GITHUB_OUTPUT }}
+
+  analyze-changes:
+    name: Analyze Breaking Changes
+    runs-on: ubuntu-latest
+    needs: check-updates
+    if: needs.check-updates.outputs.has_update == 'true'
+    outputs:
+      risk_level: ${{ steps.risk.outputs.risk_level }}
+      risk_emoji: ${{ steps.risk.outputs.risk_emoji }}
+      action_required: ${{ steps.risk.outputs.action_required }}
+
+    steps:
+      - name: Classify update risk
+        id: risk
+        run: |
+          UPDATE_TYPE="${{ needs.check-updates.outputs.update_type }}"
+
+          if [ "$UPDATE_TYPE" = "major" ]; then
+            echo "risk_level=CRITICAL" >> $GITHUB_OUTPUT
+            echo "risk_emoji=🔴" >> $GITHUB_OUTPUT
+            echo "action_required=Revisar BREAKING CHANGES e executar RUNBOOK completo" >> $GITHUB_OUTPUT
+          elif [ "$UPDATE_TYPE" = "minor" ]; then
+            echo "risk_level=WARNING" >> $GITHUB_OUTPUT
+            echo "risk_emoji=🟡" >> $GITHUB_OUTPUT
+            echo "action_required=Revisar changelog e testar antes de atualizar" >> $GITHUB_OUTPUT
+          elif [ "$UPDATE_TYPE" = "patch" ]; then
+            echo "risk_level=INFO" >> $GITHUB_OUTPUT
+            echo "risk_emoji=🟢" >> $GITHUB_OUTPUT
+            echo "action_required=Testar localmente e aplicar atualização" >> $GITHUB_OUTPUT
+          else
+            echo "risk_level=UNKNOWN" >> $GITHUB_OUTPUT
+            echo "risk_emoji=⚠️" >> $GITHUB_OUTPUT
+            echo "action_required=Investigar mudança manualmente" >> $GITHUB_OUTPUT
+          fi
+
+  notify-slack:
+    name: Send Slack Notification
+    runs-on: ubuntu-latest
+    needs: [check-updates, analyze-changes]
+    if: |
+      always() &&
+      needs.check-updates.outputs.has_update == 'true' &&
+      needs.analyze-changes.result == 'success'
+
+    steps:
+      - name: Send Slack alert
+        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CURRENT_VERSION: ${{ needs.check-updates.outputs.current_version }}
+          LATEST_VERSION: ${{ needs.check-updates.outputs.latest_version }}
+          UPDATE_TYPE: ${{ needs.check-updates.outputs.update_type }}
+          RISK_LEVEL: ${{ needs.analyze-changes.outputs.risk_level }}
+          RISK_EMOJI: ${{ needs.analyze-changes.outputs.risk_emoji }}
+          ACTION_REQUIRED: ${{ needs.analyze-changes.outputs.action_required }}
+          REPO: ${{ github.repository }}
+        run: |
+          PAYLOAD=$(cat <<EOF
+          {
+            "text": "${RISK_EMOJI} *[notebooklm-py UPDATE]* ${RISK_LEVEL}",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "${RISK_EMOJI} notebooklm-py: ${UPDATE_TYPE} update disponível"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {"type": "mrkdwn", "text": "*Versão Atual:*\n${CURRENT_VERSION}"},
+                  {"type": "mrkdwn", "text": "*Nova Versão:*\n${LATEST_VERSION}"},
+                  {"type": "mrkdwn", "text": "*Tipo de Update:*\n${UPDATE_TYPE}"},
+                  {"type": "mrkdwn", "text": "*Nível de Risco:*\n${RISK_EMOJI} ${RISK_LEVEL}"}
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Ação Necessária:* ${ACTION_REQUIRED}"
+                }
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Ver Runbook"},
+                    "url": "https://github.com/${REPO}/blob/main/ALERT-RUNBOOK.md"
+                  },
+                  {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Ver no PyPI"},
+                    "url": "https://pypi.org/project/notebooklm-py/${LATEST_VERSION}/"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Log notification (if no Slack webhook)
+        if: ${{ env.SLACK_WEBHOOK_URL == '' }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "⚠️ SLACK_WEBHOOK_URL não configurado — alerta apenas no log"
+          echo "UPDATE: ${{ needs.check-updates.outputs.update_type }} | ${{ needs.check-updates.outputs.current_version }} → ${{ needs.check-updates.outputs.latest_version }}"
+          echo "RISK: ${{ needs.analyze-changes.outputs.risk_level }}"
+
+  create-issue:
+    name: Create GitHub Issue
+    runs-on: ubuntu-latest
+    needs: [check-updates, analyze-changes]
+    if: |
+      always() &&
+      needs.check-updates.outputs.has_update == 'true' &&
+      needs.analyze-changes.result == 'success' &&
+      (needs.check-updates.outputs.update_type == 'major' || needs.check-updates.outputs.update_type == 'minor')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create tracking issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_TOKEN || github.token }}
+          script: |
+            const updateType = '${{ needs.check-updates.outputs.update_type }}';
+            const currentVersion = '${{ needs.check-updates.outputs.current_version }}';
+            const latestVersion = '${{ needs.check-updates.outputs.latest_version }}';
+            const riskLevel = '${{ needs.analyze-changes.outputs.risk_level }}';
+            const riskEmoji = '${{ needs.analyze-changes.outputs.risk_emoji }}';
+            const actionRequired = '${{ needs.analyze-changes.outputs.action_required }}';
+
+            const isMajor = updateType === 'major';
+            const title = `${riskEmoji} [notebooklm-py] ${updateType.toUpperCase()} update: ${currentVersion} → ${latestVersion}`;
+
+            const body = `## ${riskEmoji} notebooklm-py Update Detectado
+
+            **Nível de Risco:** ${riskEmoji} ${riskLevel}
+            **Tipo de Update:** \`${updateType}\`
+            **Versão Atual:** \`${currentVersion}\`
+            **Nova Versão:** \`${latestVersion}\`
+
+            ---
+
+            ## Ação Necessária
+
+            ${actionRequired}
+
+            ${isMajor ? `
+            > ⚠️ **ATENÇÃO — MAJOR UPDATE**
+            > Breaking changes são prováveis. Revisar o RUNBOOK completo antes de atualizar.
+            ` : ''}
+
+            ## Checklist
+
+            - [ ] Ler o changelog/release notes da nova versão
+            - [ ] Criar branch: \`fix/update-notebooklm-${latestVersion}\`
+            - [ ] Atualizar \`requirements.txt\`: \`notebooklm-py==${latestVersion}\`
+            - [ ] Testar localmente o \`notebook_runner.py\`
+            - [ ] Verificar imports em \`notebooklm/primeira_fase/notebook_runner.py\`
+            - [ ] Verificar enums: \`SlideDeckLength\`, \`SlideDeckFormat\`
+            - [ ] Abrir PR com label \`notebooklm-update\`
+            - [ ] modellnxia faz review + merge
+
+            ## Links Úteis
+
+            - [Runbook de Ação](./ALERT-RUNBOOK.md)
+            - [Documento de Monitoramento](./MONITORING-NOTEBOOKLM-PY.md)
+            - [PyPI - notebooklm-py](https://pypi.org/project/notebooklm-py/)
+            - [notebook_runner.py](./notebooklm/primeira_fase/notebook_runner.py)
+
+            ---
+            *Issue criada automaticamente pelo workflow \`monitor-notebooklm.yml\`*
+            `;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'notebooklm-update'
+            });
+
+            const existingIssue = issues.find(i =>
+              i.title.includes(latestVersion) && i.title.includes('notebooklm-py')
+            );
+
+            if (!existingIssue) {
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['notebooklm-update', isMajor ? 'breaking-change' : 'dependencies'],
+                assignees: ['modellnxia']
+              });
+              console.log(`Issue criada: #${issue.number} — ${issue.html_url}`);
+            } else {
+              console.log(`Issue para ${latestVersion} já existe: #${existingIssue.number}`);
+            }
+
+  log-no-update:
+    name: Log Status (No Update)
+    runs-on: ubuntu-latest
+    needs: check-updates
+    if: needs.check-updates.outputs.has_update == 'false'
+
+    steps:
+      - name: Log status
+        run: |
+          echo "✅ notebooklm-py está na versão mais recente: ${{ needs.check-updates.outputs.current_version }}"
+          echo "Próxima verificação: próxima segunda-feira às 9h UTC"
