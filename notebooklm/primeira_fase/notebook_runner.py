@@ -32,7 +32,7 @@ OUTPUT_DIR: Path = Path(os.getenv("OUTPUT_DIR", "./outputs"))
 
 
 def ensure_output_dir() -> Path:
-    """Garante que o diretório de saída existe."""
+    """Garante que o diretório de saída exista e retorna seu caminho."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return OUTPUT_DIR
 
@@ -42,6 +42,12 @@ def build_hidden_prompt_text(user_context: str = "") -> str:
     Monta o texto da 'fonte oculta' que injeta o prompt proprietário.
     O NotebookLM vai tratar isso como mais um documento de contexto.
     O usuário final nunca vê este conteúdo.
+
+    Args:
+        user_context: Contexto adicional opcional fornecido pela aplicação.
+
+    Returns:
+        Texto completo com instruções proprietárias e contexto complementar.
     """
     return f"""[INSTRUÇÕES DE SISTEMA — NÃO REFERENCIAR DIRETAMENTE]
 {SECRET_PROMPT}
@@ -76,6 +82,25 @@ async def generate_report(
       4. Gera artefatos (áudio + slides)
       5. Baixa e salva localmente
       6. Retorna caminhos dos arquivos gerados
+
+    Args:
+        sources: Lista de fontes no formato
+            [{"type": "url"|"file"|"text", "value": "...", "title": "..."}].
+        notebook_title: Nome base do notebook que será criado.
+        user_context: Contexto adicional de negócio (não é prompt secreto).
+        generate_audio: Define se gera artefato de áudio.
+        generate_slides: Define se gera artefato de slides.
+        cleanup_notebook: Quando True, remove o notebook ao final.
+
+    Returns:
+        Dicionário com IDs e caminhos dos artefatos gerados.
+
+    Example:
+        await generate_report(
+            sources=[{"type": "url", "value": "https://example.com"}],
+            notebook_title="Relatorio_Exemplo",
+            generate_slides=True,
+        )
     """
     inicio = time()
     output_dir = ensure_output_dir()
@@ -218,6 +243,9 @@ async def main():
     """
     Exemplo de uso: gera relatório a partir de URLs + PDF local.
     Substitua pelas fontes reais do seu produto.
+
+    Returns:
+        None
     """
 
     # Fontes que o USUÁRIO fornece (não contêm o prompt secreto)
