@@ -32,7 +32,7 @@ OUTPUT_DIR: Path = Path(os.getenv("OUTPUT_DIR", "./outputs"))
 
 
 def ensure_output_dir() -> Path:
-    """Garante que o diretório de saída exista e retorna seu caminho."""
+    """Garante que o diretório de saída existe e retorna seu caminho."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return OUTPUT_DIR
 
@@ -244,8 +244,6 @@ async def main():
     Exemplo de uso: gera relatório a partir de URLs + PDF local.
     Substitua pelas fontes reais do seu produto.
 
-    Returns:
-        None
     """
 
     # Fontes que o USUÁRIO fornece (não contêm o prompt secreto)
